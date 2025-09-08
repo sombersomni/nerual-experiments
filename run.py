@@ -11,6 +11,7 @@ import yaml
 import random
 from datetime import datetime
 from dataset import get_dataset_loaders, visualize_triplet_samples
+from models import ImageTransformer, TripletLoss
 
 # Set device
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -59,106 +60,6 @@ def get_scheduler(optimizer, config):
     else:
         raise ValueError(f"Unsupported scheduler type: {scheduler_type}")
 
-class PositionalEncoding(nn.Module):
-    def __init__(self, d_model, max_len=5000):
-        super(PositionalEncoding, self).__init__()
-        pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-np.log(10000.0) / d_model))
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0).transpose(0, 1)
-        self.register_buffer('pe', pe)
-
-    def forward(self, x):
-        return x + self.pe[:x.size(0), :]
-
-class ImageTransformer(nn.Module):
-    def __init__(self, input_size=28, num_channels=1, patch_size=4, embed_dim=128, num_heads=8, num_layers=6, num_classes=10):
-        super(ImageTransformer, self).__init__()
-        self.input_size = input_size
-        self.num_channels = num_channels
-        self.patch_size = patch_size
-        self.embed_dim = embed_dim
-        self.num_patches = (input_size // patch_size) ** 2
-        
-        # Patch embedding
-        self.patch_embed = nn.Linear(patch_size * patch_size * num_channels, embed_dim)
-        
-        # Positional encoding
-        self.pos_encoding = PositionalEncoding(embed_dim, self.num_patches + 1)
-        
-        # Class token
-        self.cls_token = nn.Parameter(torch.randn(1, 1, embed_dim))
-        
-        # Transformer encoder
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=embed_dim,
-            nhead=num_heads,
-            dim_feedforward=embed_dim * 4,
-            dropout=0.1,
-            batch_first=True
-        )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers)
-        
-        # Embedding head (for triplet loss)
-        self.embedding_head = nn.Sequential(
-            nn.Linear(embed_dim, embed_dim),
-            nn.ReLU(),
-            nn.Linear(embed_dim, 128),  # Final embedding dimension
-            nn.LayerNorm(128)
-        )
-        
-        # Classification head (separate MLP)
-        self.classifier = nn.Sequential(
-            nn.Linear(128, 256),
-            nn.ReLU(),
-            nn.Dropout(0.2),
-            nn.Linear(256, num_classes)
-        )
-    
-    def forward(self, x):
-        batch_size = x.size(0)
-        
-        # Convert image to patches
-        x = x.view(batch_size, self.num_channels, self.input_size, self.input_size)
-        patches = x.unfold(2, self.patch_size, self.patch_size).unfold(3, self.patch_size, self.patch_size)
-        patches = patches.contiguous().view(batch_size, -1, self.patch_size * self.patch_size * self.num_channels)
-        
-        # Patch embedding
-        x = self.patch_embed(patches)
-        
-        # Add class token
-        cls_tokens = self.cls_token.expand(batch_size, -1, -1)
-        x = torch.cat([cls_tokens, x], dim=1)
-        
-        # Add positional encoding
-        x = self.pos_encoding(x.transpose(0, 1)).transpose(0, 1)
-        
-        # Transformer
-        x = self.transformer(x)
-        
-        # Use class token for embedding
-        cls_output = x[:, 0]  # First token is class token
-        
-        # Get embeddings
-        embeddings = self.embedding_head(cls_output)
-        
-        # Classification
-        logits = self.classifier(embeddings)
-        
-        return embeddings, logits
-
-class TripletLoss(nn.Module):
-    def __init__(self, margin=2.0):
-        super(TripletLoss, self).__init__()
-        self.margin = margin
-    
-    def forward(self, anchor, positive, negative):
-        distance_positive = F.pairwise_distance(anchor, positive, p=2)
-        distance_negative = F.pairwise_distance(anchor, negative, p=2)
-        losses = F.relu(distance_positive - distance_negative + self.margin)
-        return losses.mean()
 
 
 def train_model(model, train_loader, val_loader, config, num_epochs=1):
@@ -172,7 +73,7 @@ def train_model(model, train_loader, val_loader, config, num_epochs=1):
     optimizer = optim.Adam(
         model.parameters(), 
         lr=training_config['learning_rate'], 
-        weight_decay=training_config['weight_decay']
+        weight_decay=float(training_config['weight_decay'])
     )
     scheduler = get_scheduler(optimizer, config)
     
