@@ -44,3 +44,5 @@ logs/
 # Temporary files
 *.tmp
 *.temp
+
+/img_tasks/
