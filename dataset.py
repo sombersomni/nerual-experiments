@@ -1,7 +1,7 @@
 import torch
 import torchvision
 import torchvision.transforms as transforms
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, random_split
 import random
 from collections import defaultdict
 
@@ -96,17 +96,18 @@ DATASET_CONFIGS = {
 }
 
 
-def get_dataset_loaders(dataset_name='mnist', batch_size=64, num_workers=2):
+def get_dataset_loaders(dataset_name='mnist', batch_size=64, num_workers=2, val_split=0.1):
     """
-    Generic function to load any supported dataset and create train/test loaders.
+    Generic function to load any supported dataset and create train/val/test loaders.
     
     Args:
         dataset_name: Name of the dataset ('mnist', 'cifar10', 'fashionmnist')
         batch_size: Batch size for data loaders
         num_workers: Number of worker processes for data loading
+        val_split: Fraction of training data to use for validation (default: 0.1)
         
     Returns:
-        tuple: (train_loader, test_loader, triplet_train_loader, config)
+        tuple: (train_loader, test_loader, val_loader, config)
     """
     if dataset_name not in DATASET_CONFIGS:
         raise ValueError(f"Unsupported dataset: {dataset_name}. Supported: {list(DATASET_CONFIGS.keys())}")
@@ -125,7 +126,7 @@ def get_dataset_loaders(dataset_name='mnist', batch_size=64, num_workers=2):
     # Load the appropriate dataset
     dataset_class = getattr(torchvision.datasets, config.name)
     
-    train_dataset = dataset_class(
+    full_train_dataset = dataset_class(
         train=True,
         transform=transform,
         **config.download_kwargs
@@ -137,7 +138,17 @@ def get_dataset_loaders(dataset_name='mnist', batch_size=64, num_workers=2):
         **config.download_kwargs
     )
     
-    # Create triplet dataset
+    # Split training data into train/validation
+    train_size = int((1 - val_split) * len(full_train_dataset))
+    val_size = len(full_train_dataset) - train_size
+    
+    train_dataset, val_dataset = random_split(
+        full_train_dataset, 
+        [train_size, val_size],
+        generator=torch.Generator().manual_seed(42)  # For reproducible splits
+    )
+    
+    # Create triplet dataset from training split only
     triplet_train_dataset = TripletDataset(
         train_dataset, 
         num_classes=config.num_classes,
@@ -159,22 +170,23 @@ def get_dataset_loaders(dataset_name='mnist', batch_size=64, num_workers=2):
         num_workers=num_workers
     )
     
-    # Regular train loader for validation during training
-    regular_train_loader = DataLoader(
-        train_dataset,
+    # Validation loader - separate from training data
+    val_loader = DataLoader(
+        val_dataset,
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=False,  # No need to shuffle validation data
         num_workers=num_workers
     )
     
     print(f"Dataset: {config.name}")
-    print(f"Training samples: {len(train_dataset)}")
+    print(f"Training samples: {len(train_dataset)} ({100*(1-val_split):.0f}%)")
+    print(f"Validation samples: {len(val_dataset)} ({100*val_split:.0f}%)")
     print(f"Test samples: {len(test_dataset)}")
     print(f"Input size: {config.input_size}x{config.input_size}")
     print(f"Channels: {config.num_channels}")
     print(f"Classes: {config.num_classes}")
     
-    return train_loader, test_loader, regular_train_loader, config
+    return train_loader, test_loader, val_loader, config
 
 
 def visualize_triplet_samples(triplet_dataset, config, num_samples=5):

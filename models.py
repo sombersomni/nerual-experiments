@@ -1,8 +1,12 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.optim as optim
 import numpy as np
 import math
+import pytorch_lightning as pl
+from pytorch_lightning import LightningModule
+import torchmetrics
 
 
 class PositionalEncoding(nn.Module):
@@ -285,3 +289,312 @@ class MultiTaskLoss(nn.Module):
         losses['total'] = total_loss
         
         return total_loss, losses
+
+
+class ImageTransformerLightning(LightningModule):
+    def __init__(self, config, dataset_config):
+        super().__init__()
+        self.save_hyperparameters()
+        
+        self.config = config
+        self.dataset_config = dataset_config
+        model_config = config['model']
+        training_config = config['training']
+        
+        # Create the base model
+        self.model = ImageTransformer(
+            input_size=dataset_config.input_size,
+            num_channels=dataset_config.num_channels,
+            patch_size=model_config['patch_size'],
+            embed_dim=model_config['embed_dim'],
+            num_heads=model_config['num_heads'],
+            num_layers=model_config['num_layers'],
+            num_classes=dataset_config.num_classes
+        )
+        
+        # Loss functions
+        self.triplet_loss = TripletLoss(margin=training_config['triplet_margin'])
+        self.classification_loss = nn.CrossEntropyLoss()
+        self.classifier_weight = training_config['classifier_weight']
+        
+        # Metrics
+        self.train_accuracy = torchmetrics.Accuracy(task='multiclass', num_classes=dataset_config.num_classes)
+        self.val_accuracy = torchmetrics.Accuracy(task='multiclass', num_classes=dataset_config.num_classes)
+        self.test_accuracy = torchmetrics.Accuracy(task='multiclass', num_classes=dataset_config.num_classes)
+        
+    def forward(self, x):
+        return self.model(x)
+    
+    def training_step(self, batch, batch_idx):
+        anchor, positive, negative, labels, _ = batch
+        
+        # Get embeddings and predictions
+        anchor_emb, anchor_logits = self.model(anchor)
+        positive_emb, _ = self.model(positive)
+        negative_emb, _ = self.model(negative)
+        
+        # Compute losses
+        triplet_l = self.triplet_loss(anchor_emb, positive_emb, negative_emb)
+        class_l = self.classification_loss(anchor_logits, labels)
+        total_loss = triplet_l + self.classifier_weight * class_l
+        
+        # Log losses
+        self.log('train/triplet_loss', triplet_l, on_step=True, on_epoch=True, prog_bar=True)
+        self.log('train/classification_loss', class_l, on_step=True, on_epoch=True, prog_bar=True)
+        self.log('train/total_loss', total_loss, on_step=True, on_epoch=True, prog_bar=True)
+        
+        # Log accuracy
+        self.train_accuracy(anchor_logits, labels)
+        self.log('train/accuracy', self.train_accuracy, on_step=True, on_epoch=True, prog_bar=True)
+        
+        return total_loss
+    
+    def validation_step(self, batch, batch_idx):
+        data, targets = batch
+        data = data.view(data.size(0), -1)
+        _, outputs = self.model(data)
+        
+        loss = self.classification_loss(outputs, targets)
+        self.val_accuracy(outputs, targets)
+        
+        self.log('val/loss', loss, on_step=False, on_epoch=True, prog_bar=True)
+        self.log('val/accuracy', self.val_accuracy, on_step=False, on_epoch=True, prog_bar=True)
+        
+        return loss
+    
+    def test_step(self, batch, batch_idx):
+        data, targets = batch
+        data = data.view(data.size(0), -1)
+        _, outputs = self.model(data)
+        
+        loss = self.classification_loss(outputs, targets)
+        self.test_accuracy(outputs, targets)
+        
+        self.log('test/loss', loss, on_step=False, on_epoch=True)
+        self.log('test/accuracy', self.test_accuracy, on_step=False, on_epoch=True)
+        
+        return loss
+    
+    def configure_optimizers(self):
+        training_config = self.config['training']
+        optimizer = optim.Adam(
+            self.parameters(),
+            lr=training_config['learning_rate'],
+            weight_decay=float(training_config['weight_decay'])
+        )
+        
+        scheduler_config = training_config['scheduler']
+        scheduler_type = scheduler_config['type']
+        
+        if scheduler_type == 'StepLR':
+            scheduler = optim.lr_scheduler.StepLR(
+                optimizer, 
+                step_size=scheduler_config['step_size'], 
+                gamma=scheduler_config['gamma']
+            )
+        elif scheduler_type == 'CosineAnnealingLR':
+            scheduler = optim.lr_scheduler.CosineAnnealingLR(
+                optimizer,
+                T_max=scheduler_config['T_max']
+            )
+        elif scheduler_type == 'ExponentialLR':
+            scheduler = optim.lr_scheduler.ExponentialLR(
+                optimizer,
+                gamma=scheduler_config['gamma']
+            )
+        else:
+            raise ValueError(f"Unsupported scheduler type: {scheduler_type}")
+        
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "monitor": "val/loss"
+            }
+        }
+
+
+class MultiTaskImageTransformerLightning(LightningModule):
+    def __init__(self, config, dataset_config):
+        super().__init__()
+        self.save_hyperparameters()
+        
+        self.config = config
+        self.dataset_config = dataset_config
+        model_config = config['model']
+        training_config = config['training']
+        
+        # Create the multi-task model
+        self.model = MultiTaskImageTransformer(
+            input_size=dataset_config.input_size,
+            num_channels=dataset_config.num_channels,
+            patch_size=model_config['patch_size'],
+            embed_dim=model_config['embed_dim'],
+            num_heads=model_config['num_heads'],
+            num_layers=model_config['num_layers'],
+            num_classes=dataset_config.num_classes,
+            latent_dim=model_config.get('latent_dim', 64)
+        )
+        
+        # Multi-task loss function
+        self.multitask_loss = MultiTaskLoss(
+            triplet_weight=training_config.get('triplet_weight', 1.0),
+            classification_weight=training_config.get('classification_weight', 0.5),
+            reconstruction_weight=training_config.get('reconstruction_weight', 1.0),
+            kl_weight=training_config.get('kl_weight', 0.01),
+            margin=training_config['triplet_margin']
+        )
+        
+        # Metrics
+        self.train_accuracy = torchmetrics.Accuracy(task='multiclass', num_classes=dataset_config.num_classes)
+        self.val_accuracy = torchmetrics.Accuracy(task='multiclass', num_classes=dataset_config.num_classes)
+        self.test_accuracy = torchmetrics.Accuracy(task='multiclass', num_classes=dataset_config.num_classes)
+        
+    def forward(self, x, reconstruct=True):
+        return self.model(x, reconstruct=reconstruct)
+    
+    def training_step(self, batch, batch_idx):
+        anchor, positive, negative, labels, _ = batch
+        
+        # Get full outputs for anchor (with reconstruction)
+        anchor_outputs = self.model(anchor, reconstruct=True)
+        # Get embeddings only for positive/negative (no reconstruction needed)
+        positive_outputs = self.model(positive, reconstruct=False)
+        negative_outputs = self.model(negative, reconstruct=False)
+        
+        # Compute multi-task loss
+        total_loss, losses = self.multitask_loss(anchor_outputs, positive_outputs, negative_outputs, labels)
+        
+        # Log all losses
+        self.log('train/triplet_loss', losses['triplet'], on_step=True, on_epoch=True, prog_bar=True)
+        self.log('train/classification_loss', losses['classification'], on_step=True, on_epoch=True, prog_bar=True)
+        self.log('train/reconstruction_loss', losses['reconstruction'], on_step=True, on_epoch=True, prog_bar=True)
+        self.log('train/kl_loss', losses['kl'], on_step=True, on_epoch=True, prog_bar=True)
+        self.log('train/total_loss', total_loss, on_step=True, on_epoch=True, prog_bar=True)
+        
+        # Log accuracy
+        self.train_accuracy(anchor_outputs['logits'], labels)
+        self.log('train/accuracy', self.train_accuracy, on_step=True, on_epoch=True, prog_bar=True)
+        
+        return total_loss
+    
+    def validation_step(self, batch, batch_idx):
+        data, targets = batch
+        data = data.view(data.size(0), -1)
+        
+        # Get outputs without reconstruction for faster validation
+        outputs = self.model(data, reconstruct=False)
+        
+        # Use classification loss for validation
+        loss = self.multitask_loss.classification_loss(outputs['logits'], targets)
+        self.val_accuracy(outputs['logits'], targets)
+        
+        self.log('val/loss', loss, on_step=False, on_epoch=True, prog_bar=True)
+        self.log('val/accuracy', self.val_accuracy, on_step=False, on_epoch=True, prog_bar=True)
+        
+        # Log reconstruction images to TensorBoard periodically
+        if batch_idx == 0:  # Log only for first batch to avoid cluttering
+            self._log_reconstruction_images(data, targets)
+        
+        return loss
+    
+    def _log_reconstruction_images(self, data, targets, num_samples=8):
+        """Log reconstructed images to TensorBoard"""
+        if not hasattr(self.logger, 'experiment'):
+            return
+            
+        # Select first few samples for visualization
+        sample_data = data[:num_samples]
+        sample_targets = targets[:num_samples]
+        
+        # Get reconstruction
+        with torch.no_grad():
+            outputs = self.model(sample_data, reconstruct=True)
+            reconstructions = outputs['reconstruction']
+        
+        # Reshape images for visualization
+        img_size = self.dataset_config.input_size
+        num_channels = self.dataset_config.num_channels
+        
+        original_images = sample_data.view(-1, num_channels, img_size, img_size)
+        reconstructed_images = reconstructions.view(-1, num_channels, img_size, img_size)
+        
+        # Create side-by-side comparison
+        comparison_images = torch.cat([original_images, reconstructed_images], dim=3)  # Concatenate horizontally
+        
+        # Log to TensorBoard
+        self.logger.experiment.add_images(
+            'val/reconstruction_comparison',
+            comparison_images,
+            self.current_epoch,
+            dataformats='NCHW'
+        )
+        
+        # Also log individual reconstructions and originals
+        self.logger.experiment.add_images(
+            'val/original_images',
+            original_images,
+            self.current_epoch,
+            dataformats='NCHW'
+        )
+        
+        self.logger.experiment.add_images(
+            'val/reconstructed_images',
+            reconstructed_images,
+            self.current_epoch,
+            dataformats='NCHW'
+        )
+    
+    def test_step(self, batch, batch_idx):
+        data, targets = batch
+        data = data.view(data.size(0), -1)
+        
+        # Get outputs without reconstruction for faster testing
+        outputs = self.model(data, reconstruct=False)
+        
+        # Use classification loss for testing
+        loss = self.multitask_loss.classification_loss(outputs['logits'], targets)
+        self.test_accuracy(outputs['logits'], targets)
+        
+        self.log('test/loss', loss, on_step=False, on_epoch=True)
+        self.log('test/accuracy', self.test_accuracy, on_step=False, on_epoch=True)
+        
+        return loss
+    
+    def configure_optimizers(self):
+        training_config = self.config['training']
+        optimizer = optim.Adam(
+            self.parameters(),
+            lr=training_config['learning_rate'],
+            weight_decay=float(training_config['weight_decay'])
+        )
+        
+        scheduler_config = training_config['scheduler']
+        scheduler_type = scheduler_config['type']
+        
+        if scheduler_type == 'StepLR':
+            scheduler = optim.lr_scheduler.StepLR(
+                optimizer, 
+                step_size=scheduler_config['step_size'], 
+                gamma=scheduler_config['gamma']
+            )
+        elif scheduler_type == 'CosineAnnealingLR':
+            scheduler = optim.lr_scheduler.CosineAnnealingLR(
+                optimizer,
+                T_max=scheduler_config['T_max']
+            )
+        elif scheduler_type == 'ExponentialLR':
+            scheduler = optim.lr_scheduler.ExponentialLR(
+                optimizer,
+                gamma=scheduler_config['gamma']
+            )
+        else:
+            raise ValueError(f"Unsupported scheduler type: {scheduler_type}")
+        
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "monitor": "val/loss"
+            }
+        }

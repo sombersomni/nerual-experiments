@@ -20,7 +20,7 @@ training:
   triplet_margin: 1.0
   
   # Multi-task loss weights
-  use_multitask_loss: false  # Set to true to use MultiTaskLoss instead of simple triplet+classification
+  use_multitask_loss: true   # Set to true to use MultiTaskLoss instead of simple triplet+classification
   triplet_weight: 1.0       # Weight for triplet loss in multi-task learning
   classification_weight: 0.5 # Weight for classification loss in multi-task learning  
   reconstruction_weight: 1.0 # Weight for VAE reconstruction loss
