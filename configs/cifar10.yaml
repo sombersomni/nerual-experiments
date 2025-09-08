@@ -10,6 +10,7 @@ model:
   embed_dim: 192  # Larger embedding for RGB
   num_heads: 12
   num_layers: 8   # Deeper model for more complex data
+  latent_dim: 128 # Larger latent space for complex RGB images
 
 # Training Parameters
 training:
@@ -17,6 +18,13 @@ training:
   weight_decay: 2e-4     # Higher weight decay
   classifier_weight: 0.7  # Higher classification weight
   triplet_margin: 1.5
+  
+  # Multi-task loss weights - CIFAR-10 benefits significantly from reconstruction
+  use_multitask_loss: true   # Enable multi-task learning for complex visual features
+  triplet_weight: 1.0        # Weight for triplet loss in multi-task learning
+  classification_weight: 0.7 # Higher classification weight for complex objects
+  reconstruction_weight: 1.5 # Higher reconstruction weight to learn detailed RGB textures
+  kl_weight: 0.02            # Higher KL weight for better latent space regularization
   
   # Learning Rate Scheduler
   scheduler:

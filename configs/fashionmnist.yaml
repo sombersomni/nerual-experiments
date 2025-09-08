@@ -10,6 +10,7 @@ model:
   embed_dim: 128
   num_heads: 8
   num_layers: 6
+  latent_dim: 64  # VAE latent space dimension
 
 # Training Parameters
 training:
@@ -17,6 +18,13 @@ training:
   weight_decay: 1e-4
   classifier_weight: 0.6  # Higher weight for classification in fashion items
   triplet_margin: 1.2
+  
+  # Multi-task loss weights - Fashion-MNIST benefits from reconstruction
+  use_multitask_loss: true   # Enable multi-task learning for better feature learning
+  triplet_weight: 1.0        # Weight for triplet loss in multi-task learning
+  classification_weight: 0.6 # Higher classification weight for fashion items
+  reconstruction_weight: 1.2 # Higher reconstruction weight for detailed fashion textures
+  kl_weight: 0.015           # Slightly higher KL weight for better regularization
   
   # Learning Rate Scheduler
   scheduler:

@@ -10,6 +10,7 @@ model:
   embed_dim: 128
   num_heads: 8
   num_layers: 6
+  latent_dim: 64  # VAE latent space dimension
 
 # Training Parameters
 training:
@@ -17,6 +18,13 @@ training:
   weight_decay: 1e-4
   classifier_weight: 0.5  # Weight for classification loss vs triplet loss
   triplet_margin: 1.0
+  
+  # Multi-task loss weights
+  use_multitask_loss: false  # Set to true to use MultiTaskLoss instead of simple triplet+classification
+  triplet_weight: 1.0       # Weight for triplet loss in multi-task learning
+  classification_weight: 0.5 # Weight for classification loss in multi-task learning  
+  reconstruction_weight: 1.0 # Weight for VAE reconstruction loss
+  kl_weight: 0.01           # Weight for KL divergence loss
   
   # Learning Rate Scheduler
   scheduler:
