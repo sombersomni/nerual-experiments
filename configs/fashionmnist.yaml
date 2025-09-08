@@ -1,0 +1,36 @@
+# FashionMNIST Dataset Configuration
+dataset:
+  name: "fashionmnist"
+  batch_size: 64
+  num_workers: 2
+
+# Model Architecture
+model:
+  patch_size: 4
+  embed_dim: 128
+  num_heads: 8
+  num_layers: 6
+
+# Training Parameters
+training:
+  learning_rate: 0.0003  # Slightly lower LR for FashionMNIST
+  weight_decay: 1e-4
+  classifier_weight: 0.6  # Higher weight for classification in fashion items
+  triplet_margin: 1.2
+  
+  # Learning Rate Scheduler
+  scheduler:
+    type: "CosineAnnealingLR"  # Better for FashionMNIST
+    step_size: 7
+    gamma: 0.7
+    T_max: 15
+
+# Reproducibility
+random_seed: 42
+
+# Logging and Saving
+logging:
+  print_frequency: 100
+  save_embeddings_visualization: true
+  save_triplet_samples: true
+  num_visualization_samples: 5

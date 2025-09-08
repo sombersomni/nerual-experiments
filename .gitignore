@@ -1,0 +1,46 @@
+# Data directories
+data/
+*.gz
+*.tar.gz
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environment
+venv/
+env/
+ENV/
+
+# Model files
+models/
+*.pth
+*.pkl
+
+# Generated images and plots
+*.png
+*.jpg
+*.jpeg
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+*.tmp
+*.temp

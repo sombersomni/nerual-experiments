@@ -1,0 +1,36 @@
+# CIFAR-10 Dataset Configuration
+dataset:
+  name: "cifar10"
+  batch_size: 32  # Smaller batch size for RGB images
+  num_workers: 2
+
+# Model Architecture
+model:
+  patch_size: 4
+  embed_dim: 192  # Larger embedding for RGB
+  num_heads: 12
+  num_layers: 8   # Deeper model for more complex data
+
+# Training Parameters
+training:
+  learning_rate: 0.0001  # Lower LR for more complex dataset
+  weight_decay: 2e-4     # Higher weight decay
+  classifier_weight: 0.7  # Higher classification weight
+  triplet_margin: 1.5
+  
+  # Learning Rate Scheduler
+  scheduler:
+    type: "CosineAnnealingLR"  # Good for CIFAR-10
+    step_size: 10
+    gamma: 0.5
+    T_max: 20
+
+# Reproducibility
+random_seed: 42
+
+# Logging and Saving
+logging:
+  print_frequency: 50   # More frequent logging for slower training
+  save_embeddings_visualization: true
+  save_triplet_samples: true
+  num_visualization_samples: 5

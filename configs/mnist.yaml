@@ -1,0 +1,36 @@
+# MNIST Dataset Configuration
+dataset:
+  name: "mnist"
+  batch_size: 64
+  num_workers: 2
+
+# Model Architecture
+model:
+  patch_size: 4
+  embed_dim: 128
+  num_heads: 8
+  num_layers: 6
+
+# Training Parameters
+training:
+  learning_rate: 0.0005
+  weight_decay: 1e-4
+  classifier_weight: 0.5  # Weight for classification loss vs triplet loss
+  triplet_margin: 1.0
+  
+  # Learning Rate Scheduler
+  scheduler:
+    type: "StepLR"  # Options: "StepLR", "CosineAnnealingLR", "ExponentialLR"
+    step_size: 5    # For StepLR
+    gamma: 0.5      # For StepLR and ExponentialLR
+    T_max: 10       # For CosineAnnealingLR
+
+# Reproducibility
+random_seed: 42
+
+# Logging and Saving
+logging:
+  print_frequency: 100  # Print loss every N batches
+  save_embeddings_visualization: true
+  save_triplet_samples: true
+  num_visualization_samples: 5
