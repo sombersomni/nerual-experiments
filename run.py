@@ -23,6 +23,12 @@ from pytorch_lightning.loggers import TensorBoardLogger
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Using device: {device}")
 
+if device.type == 'cuda':
+    print(f"GPU: {torch.cuda.get_device_name(0)}")
+    print(f"CUDA Version: {torch.version.cuda}")
+    print(f"CUDNN Version: {torch.backends.cudnn.version()}")
+    torch.set_float32_matmul_precision('medium')
+
 def load_config(config_path):
     """Load configuration from YAML file"""
     with open(config_path, 'r') as file:

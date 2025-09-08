@@ -14,13 +14,13 @@ model:
 
 # Training Parameters
 training:
-  learning_rate: 0.0005
+  learning_rate: 0.001
   weight_decay: 1e-4
   classifier_weight: 0.5  # Weight for classification loss vs triplet loss
   triplet_margin: 1.0
   
   # Multi-task loss weights
-  use_multitask_loss: true   # Set to true to use MultiTaskLoss instead of simple triplet+classification
+  use_multitask_loss: true  # Set to true to use MultiTaskLoss instead of simple triplet+classification
   triplet_weight: 1.0       # Weight for triplet loss in multi-task learning
   classification_weight: 0.5 # Weight for classification loss in multi-task learning  
   reconstruction_weight: 1.0 # Weight for VAE reconstruction loss

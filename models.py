@@ -7,6 +7,7 @@ import math
 import pytorch_lightning as pl
 from pytorch_lightning import LightningModule
 import torchmetrics
+import copy
 
 
 class PositionalEncoding(nn.Module):
@@ -101,9 +102,12 @@ class MultiTaskImageTransformer(nn.Module):
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers)
         
-        # VAE latent space heads
+        # VAE latent space heads (for reconstruction tasks)
         self.mu_head = nn.Linear(embed_dim, latent_dim)
         self.logvar_head = nn.Linear(embed_dim, latent_dim)
+        
+        # Deterministic latent head (for non-reconstruction tasks)
+        self.deterministic_head = nn.Linear(embed_dim, latent_dim)
         
         # Embedding head (for triplet loss) - operates on latent samples
         self.embedding_head = nn.Sequential(
@@ -158,10 +162,18 @@ class MultiTaskImageTransformer(nn.Module):
         # Use class token for latent space
         cls_output = x[:, 0]  # First token is class token
         
-        # VAE latent space
-        mu = self.mu_head(cls_output)
-        logvar = self.logvar_head(cls_output)
-        z = self.reparameterize(mu, logvar)
+        # Choose latent space based on whether reconstruction is needed
+        if reconstruct:
+            # VAE latent space with reparameterization for reconstruction tasks
+            mu = self.mu_head(cls_output)
+            logvar = self.logvar_head(cls_output)
+            z = self.reparameterize(mu, logvar)
+        else:
+            # Deterministic latent space for non-reconstruction tasks
+            z = self.deterministic_head(cls_output)
+            # Set mu and logvar to None for consistency
+            mu = None
+            logvar = None
         
         # Get embeddings from latent sample
         embeddings = self.embedding_head(z)
@@ -172,10 +184,13 @@ class MultiTaskImageTransformer(nn.Module):
         outputs = {
             'embeddings': embeddings,
             'logits': logits,
-            'mu': mu,
-            'logvar': logvar,
             'z': z
         }
+        
+        # Only include mu and logvar when using VAE (reconstruction mode)
+        if reconstruct:
+            outputs['mu'] = mu
+            outputs['logvar'] = logvar
         
         # Optionally compute reconstruction
         if reconstruct:
@@ -227,6 +242,29 @@ class ReconstructionLoss(nn.Module):
         
     def forward(self, reconstruction, original):
         """Compute reconstruction loss"""
+        # Handle size mismatch between reconstruction and original
+        if reconstruction.shape != original.shape:
+            # Reshape original to match flattened input size
+            if len(original.shape) == 2:  # Flattened input
+                batch_size = original.shape[0]
+                # Determine original dimensions from flattened size
+                flat_size = original.shape[1]
+                if flat_size == 784:  # 28x28 MNIST
+                    original = original.view(batch_size, 1, 28, 28)
+                elif flat_size == 1024:  # 32x32
+                    original = original.view(batch_size, 1, 32, 32)
+                elif flat_size == 3072:  # 32x32x3 CIFAR
+                    original = original.view(batch_size, 3, 32, 32)
+            
+            # Resize reconstruction to match original size if needed
+            if reconstruction.shape[-2:] != original.shape[-2:]:
+                reconstruction = F.interpolate(
+                    reconstruction, 
+                    size=original.shape[-2:], 
+                    mode='bilinear', 
+                    align_corners=False
+                )
+        
         if self.loss_type == 'mse':
             return F.mse_loss(reconstruction, original, reduction='mean')
         elif self.loss_type == 'bce':
@@ -237,21 +275,36 @@ class ReconstructionLoss(nn.Module):
 
 class MultiTaskLoss(nn.Module):
     def __init__(self, triplet_weight=1.0, classification_weight=0.5, 
-                 reconstruction_weight=1.0, kl_weight=0.01, margin=2.0):
+                 reconstruction_weight=1.0, kl_weight=0.01, margin=2.0,
+                 beta_anneal_start=0.001, beta_anneal_epochs=100):
         super(MultiTaskLoss, self).__init__()
         self.triplet_weight = triplet_weight
         self.classification_weight = classification_weight
         self.reconstruction_weight = reconstruction_weight
         self.kl_weight = kl_weight
+        self.beta_anneal_start = beta_anneal_start
+        self.beta_anneal_epochs = beta_anneal_epochs
         
         self.triplet_loss = TripletLoss(margin=margin)
         self.classification_loss = nn.CrossEntropyLoss()
         self.reconstruction_loss = ReconstructionLoss('mse')
         self.kl_loss = KLDivergenceLoss()
         
-    def forward(self, anchor_outputs, positive_outputs, negative_outputs, labels):
+    def get_beta(self, current_epoch):
+        """Calculate current beta (KL weight) with annealing"""
+        if current_epoch >= self.beta_anneal_epochs:
+            return self.kl_weight
+        else:
+            # Linear annealing from beta_anneal_start to kl_weight
+            progress = current_epoch / self.beta_anneal_epochs
+            return self.beta_anneal_start + progress * (self.kl_weight - self.beta_anneal_start)
+        
+    def forward(self, anchor_outputs, positive_outputs, negative_outputs, labels, current_epoch=0):
         """Compute multi-task loss"""
         losses = {}
+        
+        # Get current beta value with annealing
+        current_beta = self.get_beta(current_epoch)
         
         # Triplet loss
         triplet_l = self.triplet_loss(
@@ -265,8 +318,11 @@ class MultiTaskLoss(nn.Module):
         classification_l = self.classification_loss(anchor_outputs['logits'], labels)
         losses['classification'] = classification_l
         
-        # KL divergence loss
-        kl_l = self.kl_loss(anchor_outputs['mu'], anchor_outputs['logvar'])
+        # KL divergence loss (only if mu and logvar are available)
+        if 'mu' in anchor_outputs and 'logvar' in anchor_outputs:
+            kl_l = self.kl_loss(anchor_outputs['mu'], anchor_outputs['logvar'])
+        else:
+            kl_l = torch.tensor(0.0, device=triplet_l.device)
         losses['kl'] = kl_l
         
         # Reconstruction loss (only if reconstruction is available)
@@ -280,11 +336,11 @@ class MultiTaskLoss(nn.Module):
             reconstruction_l = torch.tensor(0.0, device=triplet_l.device)
             losses['reconstruction'] = reconstruction_l
             
-        # Total loss
+        # Total loss (using annealed beta for KL term)
         total_loss = (self.triplet_weight * triplet_l + 
                      self.classification_weight * classification_l + 
                      self.reconstruction_weight * reconstruction_l + 
-                     self.kl_weight * kl_l)
+                     current_beta * kl_l)
         
         losses['total'] = total_loss
         
@@ -436,13 +492,23 @@ class MultiTaskImageTransformerLightning(LightningModule):
             latent_dim=model_config.get('latent_dim', 64)
         )
         
+        # Create EMA decoder for positive/negative samples to prevent VAE collapse
+        self.ema_decoder = copy.deepcopy(self.model.decoder)
+        self.ema_decay = training_config.get('ema_decay', 0.999)
+        
+        # Freeze EMA decoder parameters (they will be updated via EMA)
+        for param in self.ema_decoder.parameters():
+            param.requires_grad = False
+        
         # Multi-task loss function
         self.multitask_loss = MultiTaskLoss(
             triplet_weight=training_config.get('triplet_weight', 1.0),
             classification_weight=training_config.get('classification_weight', 0.5),
             reconstruction_weight=training_config.get('reconstruction_weight', 1.0),
             kl_weight=training_config.get('kl_weight', 0.01),
-            margin=training_config['triplet_margin']
+            margin=training_config['triplet_margin'],
+            beta_anneal_start=training_config.get('beta_anneal_start', 0.001),
+            beta_anneal_epochs=training_config.get('beta_anneal_epochs', 100)
         )
         
         # Metrics
@@ -453,17 +519,27 @@ class MultiTaskImageTransformerLightning(LightningModule):
     def forward(self, x, reconstruct=True):
         return self.model(x, reconstruct=reconstruct)
     
+    def update_ema(self):
+        """Update EMA decoder parameters"""
+        with torch.no_grad():
+            for ema_param, param in zip(self.ema_decoder.parameters(), self.model.decoder.parameters()):
+                ema_param.data = self.ema_decay * ema_param.data + (1 - self.ema_decay) * param.data
+    
     def training_step(self, batch, batch_idx):
         anchor, positive, negative, labels, _ = batch
         
-        # Get full outputs for anchor (with reconstruction)
+        # Get full outputs for anchor (with reconstruction) using main model
         anchor_outputs = self.model(anchor, reconstruct=True)
-        # Get embeddings only for positive/negative (no reconstruction needed)
+        
+        # Get embeddings for positive/negative samples (no reconstruction needed)
         positive_outputs = self.model(positive, reconstruct=False)
         negative_outputs = self.model(negative, reconstruct=False)
         
-        # Compute multi-task loss
-        total_loss, losses = self.multitask_loss(anchor_outputs, positive_outputs, negative_outputs, labels)
+        # Compute multi-task loss with current epoch for β-annealing
+        total_loss, losses = self.multitask_loss(anchor_outputs, positive_outputs, negative_outputs, labels, current_epoch=self.current_epoch)
+        
+        # Update EMA model after loss computation
+        self.update_ema()
         
         # Log all losses
         self.log('train/triplet_loss', losses['triplet'], on_step=True, on_epoch=True, prog_bar=True)
@@ -471,6 +547,10 @@ class MultiTaskImageTransformerLightning(LightningModule):
         self.log('train/reconstruction_loss', losses['reconstruction'], on_step=True, on_epoch=True, prog_bar=True)
         self.log('train/kl_loss', losses['kl'], on_step=True, on_epoch=True, prog_bar=True)
         self.log('train/total_loss', total_loss, on_step=True, on_epoch=True, prog_bar=True)
+        
+        # Log current beta value for monitoring annealing progress
+        current_beta = self.multitask_loss.get_beta(self.current_epoch)
+        self.log('train/beta_kl_weight', current_beta, on_step=False, on_epoch=True, prog_bar=False)
         
         # Log accuracy
         self.train_accuracy(anchor_outputs['logits'], labels)
@@ -513,11 +593,24 @@ class MultiTaskImageTransformerLightning(LightningModule):
             reconstructions = outputs['reconstruction']
         
         # Reshape images for visualization
-        img_size = self.dataset_config.input_size
+        original_img_size = self.dataset_config.input_size
         num_channels = self.dataset_config.num_channels
         
-        original_images = sample_data.view(-1, num_channels, img_size, img_size)
-        reconstructed_images = reconstructions.view(-1, num_channels, img_size, img_size)
+        # Original images
+        original_images = sample_data.view(-1, num_channels, original_img_size, original_img_size)
+        
+        # Reconstructed images - the decoder outputs 32x32 for all datasets
+        decoder_output_size = 32
+        reconstructed_images = reconstructions.view(-1, num_channels, decoder_output_size, decoder_output_size)
+        
+        # If original size is different from decoder output, resize reconstructed images to match
+        if original_img_size != decoder_output_size:
+            reconstructed_images = F.interpolate(
+                reconstructed_images, 
+                size=(original_img_size, original_img_size), 
+                mode='bilinear', 
+                align_corners=False
+            )
         
         # Create side-by-side comparison
         comparison_images = torch.cat([original_images, reconstructed_images], dim=3)  # Concatenate horizontally
@@ -598,3 +691,21 @@ class MultiTaskImageTransformerLightning(LightningModule):
                 "monitor": "val/loss"
             }
         }
+    
+    def on_save_checkpoint(self, checkpoint):
+        """Save EMA decoder state in checkpoint"""
+        checkpoint['ema_decoder_state_dict'] = self.ema_decoder.state_dict()
+        checkpoint['ema_decay'] = self.ema_decay
+    
+    def on_load_checkpoint(self, checkpoint):
+        """Load EMA decoder state from checkpoint"""
+        if 'ema_decoder_state_dict' in checkpoint:
+            self.ema_decoder.load_state_dict(checkpoint['ema_decoder_state_dict'])
+        elif 'ema_model_state_dict' in checkpoint:
+            # Backward compatibility: extract decoder from full model state
+            full_ema_state = checkpoint['ema_model_state_dict']
+            decoder_state = {k.replace('decoder.', ''): v for k, v in full_ema_state.items() if k.startswith('decoder.')}
+            if decoder_state:
+                self.ema_decoder.load_state_dict(decoder_state)
+        if 'ema_decay' in checkpoint:
+            self.ema_decay = checkpoint['ema_decay']
